@@ -1,0 +1,106 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ===================== Параметры задачи =====================
+gamma = 1.4
+L = 1.0
+x_left = -L / 2
+x_right = L / 2
+
+# Начальные условия (double shock)
+rho_L, u_L, p_L = 1.0,  2.0, 0.4
+rho_R, u_R, p_R = 1.0, -2.0, 0.4
+
+# Параметры численной схемы
+Nv = 400                 # больше ячеек → лучше разрешение
+Co = 0.8
+t_max = 0.1              # уменьшено, чтобы волны не дошли до границ
+
+# ===================== Вспомогательные функции =====================
+def prim_to_cons(rho, u, p):
+    E = p / (rho * (gamma - 1)) + 0.5 * u ** 2
+    return np.array([rho, rho * u, rho * E])
+
+def cons_to_prim(q):
+    rho = q[0]
+    u = q[1] / rho
+    E = q[2] / rho
+    p = (gamma - 1) * rho * (E - 0.5 * u ** 2)
+    return rho, u, p
+
+def flux(q):
+    rho, u, p = cons_to_prim(q)
+    E = q[2] / rho
+    H = E + p / rho
+    return np.array([rho * u, p + rho * u ** 2, rho * u * H])
+
+# ===================== Сетка =====================
+dx = L / Nv
+x_edges = np.linspace(x_left, x_right, Nv + 1)
+x_centers = 0.5 * (x_edges[:-1] + x_edges[1:])
+
+# ===================== Инициализация =====================
+rho = np.where(x_centers < 0, rho_L, rho_R)
+u   = np.where(x_centers < 0, u_L, u_R)
+p   = np.where(x_centers < 0, p_L, p_R)
+
+q = np.array([prim_to_cons(rho[i], u[i], p[i]) for i in range(Nv)]).T
+
+q_store, p_store, t_store = [], [], []
+t = 0.0
+
+# ===================== Основной цикл =====================
+while t < t_max:
+    c = np.sqrt(gamma * p / rho)
+    lambda_max = np.max(np.abs(u) + c)
+    dt = Co * dx / lambda_max
+    if t + dt > t_max:
+        dt = t_max - t
+
+    f_edges = np.zeros((3, Nv + 1))
+    for i in range(1, Nv):
+        qL = q[:, i - 1]
+        qR = q[:, i]
+        fL = flux(qL)
+        fR = flux(qR)
+
+        rhoL, uL_loc, pL_loc = cons_to_prim(qL)
+        rhoR, uR_loc, pR_loc = cons_to_prim(qR)
+        cL = np.sqrt(gamma * pL_loc / rhoL)
+        cR = np.sqrt(gamma * pR_loc / rhoR)
+        lam = max(abs(uL_loc) + cL, abs(uR_loc) + cR)
+
+        f_edges[:, i] = 0.5 * (fL + fR) - 0.5 * lam * (qR - qL)
+
+    # Граничные потоки — нулевые (при условии, что волны не дошли)
+    f_edges[:, 0] = 0.0
+    f_edges[:, -1] = 0.0
+
+    for i in range(Nv):
+        q[:, i] -= (dt / dx) * (f_edges[:, i + 1] - f_edges[:, i])
+
+    for i in range(Nv):
+        rho[i], u[i], p[i] = cons_to_prim(q[:, i])
+
+    t += dt
+    q_store.append(q.copy())
+    p_store.append(p.copy())
+    t_store.append(t)
+
+print(f"Интегрирование завершено: t = {t:.6f}, итераций = {len(t_store)}")
+
+# ===================== Визуализация =====================
+fig, axs = plt.subplots(1, 3, figsize=(15, 4))
+titles = ['Плотность', 'Скорость', 'Давление']
+vars_to_plot = [rho, u, p]
+
+for ax, var, title in zip(axs, vars_to_plot, titles):
+    ax.plot(x_centers, var, 'b-', linewidth=2, label=f'Численное (t = {t:.3f})')
+    ax.set_xlabel('x')
+    ax.set_ylabel(title)
+    ax.set_title(title)
+    ax.grid(True)
+    ax.legend()
+
+plt.tight_layout()
+plt.show()
