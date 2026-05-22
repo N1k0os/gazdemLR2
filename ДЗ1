@@ -1,0 +1,219 @@
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib as mpl
+import json
+
+# ==================== Данные варианта 59 ====================
+p_0 = 4.38e6
+T_0 = 2597
+R = 351
+k = 1.31
+d_c = 0.63
+ν_B = 11.2
+D_k = 2.3 * d_c
+μ_t = 0.75
+α = np.radians(44.5)
+β = np.radians(6.4)
+p_H = 100000
+
+N1 = 100
+N2 = 100
+ε = 1e-10
+
+# ==================== Геометрия ====================
+ρ_0 = p_0 / (R * T_0)
+S_c = np.pi * d_c**2 / 4
+d_B = d_c * np.sqrt(ν_B)
+x_c = 0.5 * (D_k - d_c) / np.tan(α)
+x_B = x_c + 0.5 * (d_B - d_c) / np.tan(β)
+
+def d(x):
+    return np.where(x <= x_c,
+                    D_k - (D_k - d_c) * x / x_c,
+                    d_c + (d_B - d_c) * (x - x_c) / (x_B - x_c))
+
+# Начинаем с очень малого x, но не с нуля, чтобы избежать сингулярности
+x_start = 1e-6
+x1 = np.linspace(x_start, x_c, N1, endpoint=False)
+x2 = np.linspace(x_c, x_B, N2)
+x = np.concatenate([x1, x2])
+S = np.pi * d(x)**2 / 4
+S_ratio = S / S_c
+
+# ==================== Функции для решения A(M) = S/S* ====================
+def A(M, k):
+    term = (2/(k+1)) * (1 + (k-1)/2 * M**2)
+    return (1/M) * term ** ((k+1)/(2*(k-1)))
+
+def dA_dM(M, k):
+    term = (2/(k+1)) * (1 + (k-1)/2 * M**2)
+    exp = (k+1)/(2*(k-1))
+    term_exp = term ** exp
+    dterm_dM = (2/(k+1)) * (k-1) * M
+    dterm_exp_dM = exp * term**(exp-1) * dterm_dM
+    return -1/M**2 * term_exp + (1/M) * dterm_exp_dM
+
+def newton_M(S_target, k, is_supersonic, tol=1e-10, max_iter=100):
+    if not is_supersonic:
+        # Дозвук: M in (0,1)
+        # Для больших S_target используем M_start = 0.01 / S_target? Но лучше:
+        if S_target > 2:
+            M = 0.2   # начальное приближение для очень больших S/S*
+        else:
+            M = 0.5
+        for _ in range(max_iter):
+            f = A(M, k) - S_target
+            if abs(f) < tol:
+                break
+            df = dA_dM(M, k)
+            if abs(df) < 1e-15:
+                break
+            M_new = M - f / df
+            if M_new <= 0 or M_new >= 1:
+                M_new = (M + 0.5) / 2
+            if abs(M_new - M) < tol:
+                M = M_new
+                break
+            M = M_new
+        return min(max(M, 1e-6), 1 - 1e-6)
+    else:
+        # Сверхзвук
+        if S_target < 2: M = 1.2
+        elif S_target < 5: M = 1.8
+        elif S_target < 10: M = 2.5
+        else: M = 3.5
+        for _ in range(max_iter):
+            f = A(M, k) - S_target
+            if abs(f) < tol:
+                break
+            df = dA_dM(M, k)
+            if abs(df) < 1e-15:
+                break
+            M_new = M - f / df
+            if M_new <= 1:
+                M_new = 1 + (M - 1)/2
+            if abs(M_new - M) < tol:
+                M = M_new
+                break
+            M = M_new
+        return M
+
+# ==================== Расчёт параметров ====================
+M_arr = np.zeros_like(x)
+for i, ss in enumerate(S_ratio):
+    if x[i] <= x_c:
+        M_arr[i] = newton_M(ss, k, is_supersonic=False, tol=ε)
+    else:
+        M_arr[i] = newton_M(ss, k, is_supersonic=True, tol=ε)
+
+# Пересчёт λ
+lam_arr = M_arr / np.sqrt((k+1)/2 - (k-1)/2 * M_arr**2)
+
+# Газодинамические функции
+tau = lambda lam, k: 1 - (k-1)/(k+1)*lam**2
+eps = lambda lam, k: tau(lam, k)**(1/(k-1))
+pi = lambda lam, k: tau(lam, k)**(k/(k-1))
+
+T = T_0 * tau(lam_arr, k)
+ρ = ρ_0 * eps(lam_arr, k)
+p = p_0 * pi(lam_arr, k)
+c_star = np.sqrt(2*k*R*T_0/(k+1))
+v = lam_arr * c_star
+j = ρ * v
+G = j * S
+
+# ==================== Силовые характеристики ====================
+G_value = G[-1]   # лучше брать теоретический, но для отладки оставим
+v_B = v[-1]
+p_B = p[-1]
+S_B = S[-1]
+P = G_value * v_B + S_B * (p_B - p_H)
+P_ud = P / G_value
+P_vak = G_value * v_B + S_B * p_B
+P_ud_vak = P_vak / G_value
+v_rocket = -P_ud_vak * np.log(1 - μ_t)
+
+print(f"Расход: {G_value:.2f} кг/с")
+print(f"v_B = {v_B:.1f} м/с, p_B = {p_B/1000:.2f} кПа")
+print(f"Тяга (атм): {P/1000:.1f} кН, уд. {P_ud:.1f} м/с")
+print(f"Тяга (вакуум): {P_vak/1000:.1f} кН, уд. {P_ud_vak:.1f} м/с")
+print(f"Скорость ракеты: {v_rocket:.1f} м/с")
+print(f"Степень нерасчётности: {p_H/p_B:.2f}")
+
+# ==================== Расчётный режим ====================
+M_des = np.sqrt(2/(k-1) * ((p_0/p_H)**((k-1)/k) - 1))
+S_des = S_c * (1/M_des) * (2/(k+1))**((k+1)/(2*(k-1))) * (1+(k-1)/2*M_des**2)**((k+1)/(2*(k-1)))
+d_des = np.sqrt(4*S_des/np.pi)
+x_des = x_c + (d_des - d_c) / (2*np.tan(β))
+print(f"\nРасчётный режим: M = {M_des:.3f}, x_вых = {x_des:.3f} м")
+if x_des > x_B:
+    print(f"Нужно удлинить на {x_des - x_B:.3f} м")
+else:
+    print(f"Нужно укоротить на {x_B - x_des:.3f} м")
+
+# ==================== Построение графиков ====================
+mpl.rcParams.update({'font.size': 12, 'font.family': 'serif'})
+
+def plot_full_and_zoom(x, y, ylabel, filename):
+    plt.figure(figsize=(10,4))
+    plt.subplot(1,2,1)
+    plt.plot(x, y)
+    plt.xlabel('x, м')
+    plt.ylabel(ylabel)
+    plt.axvline(x=x_c, ls='--', color='gray')
+    plt.grid(True)
+    plt.title('')
+    plt.subplot(1,2,2)
+    mask = x <= 0.9
+    plt.plot(x[mask], y[mask])
+    plt.xlabel('x, м')
+    plt.ylabel(ylabel)
+    plt.axvline(x=x_c, ls='--', color='gray')
+    plt.xlim(0, 0.9)
+    plt.grid(True)
+    plt.title('')
+    plt.tight_layout()
+    plt.savefig(filename)
+    plt.show()
+
+plot_full_and_zoom(x, S, '$S$, м²', 'graph_S.png')
+plot_full_and_zoom(x, M_arr, '$M$', 'graph_M.png')
+plot_full_and_zoom(x, lam_arr, r'$\lambda$', 'graph_lambda.png')
+plot_full_and_zoom(x, T, '$T$, K', 'graph_T.png')
+plot_full_and_zoom(x, p/1000, '$p$, кПа', 'graph_p.png')
+plot_full_and_zoom(x, ρ, r'$\rho$, кг/м³', 'graph_rho.png')
+plot_full_and_zoom(x, j, r'$j$, кг/(с·м²)', 'graph_j.png')
+plot_full_and_zoom(x, G, '$G$, кг/с', 'graph_G.png')
+
+# График S/S* от M
+plt.figure()
+plt.plot(M_arr, S/S_c)
+plt.xlabel('$M$')
+plt.ylabel('$S/S_*$')
+plt.grid(True)
+plt.savefig('graph_S_Sc.png')
+plt.show()
+
+# ==================== Сохранение JSON ====================
+data = {
+    "Вариант": 59,
+    "Сопло": {
+        "D_k_м": float(D_k), "d_c_м": float(d_c), "ν_B": float(ν_B),
+        "α_град": float(np.degrees(α)), "β_град": float(np.degrees(β)),
+        "d_B_м": float(d_B), "x_c_м": float(x_c), "x_B_м": float(x_B),
+        "S_c_м2": float(S_c)
+    },
+    "Физика": {
+        "G_кг_с": float(G_value), "v_B_м_с": float(v_B), "p_B_Па": float(p_B),
+        "P_Н": float(P), "P_уд_м_с": float(P_ud),
+        "P_вак_Н": float(P_vak), "P_уд_вак_м_с": float(P_ud_vak),
+        "v_ракеты_м_с": float(v_rocket), "степень_нерасчётности": float(p_H/p_B)
+    },
+    "Расчётный_режим": {
+        "M_вых": float(M_des), "d_вых_м": float(d_des),
+        "x_вых_м": float(x_des), "изменение_длины_м": float(x_des - x_B)
+    }
+}
+with open("hw_nozzle_var59.json", "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+print("\nДанные сохранены в hw_nozzle_var59.json")
